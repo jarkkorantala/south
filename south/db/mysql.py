@@ -92,6 +92,7 @@ class DatabaseOperations(generic.DatabaseOperations):
     alter_string_set_null = 'MODIFY %(column)s %(type)s NULL;'
     alter_string_drop_null = 'MODIFY %(column)s %(type)s NOT NULL;'
     drop_index_string = 'DROP INDEX %(index_name)s ON %(table_name)s'
+    add_key_sql = "ALTER TABLE %(table)s ADD KEY %(key_name)s (%(column)s)"
     delete_primary_key_sql = "ALTER TABLE %(table)s DROP PRIMARY KEY"
     delete_foreign_key_sql = "ALTER TABLE %(table)s DROP FOREIGN KEY %(constraint)s"
     delete_unique_sql = "ALTER TABLE %s DROP INDEX %s"
@@ -278,3 +279,26 @@ class DatabaseOperations(generic.DatabaseOperations):
         is_text = True in [type.find(t) > -1 for t in self.text_types]
         if not is_geom and not is_text:
             super(DatabaseOperations, self)._alter_set_defaults(field, name, params, sqls)
+
+    @invalidate_table_constraints
+    def delete_unique(self, table_name, columns):
+        """
+        If deleting a single-column UNIQUE INDEX and the the column is part of
+        a FOREIGN KEY constraint, recreate the KEY as non-unique to avoid
+        database corruption.
+
+        See MySQL bug 68148 (http://bugs.mysql.com/bug.php?id=68148).
+        """
+        super(DatabaseOperations, self).delete_unique(table_name, columns)
+
+        if len(columns) != 1:
+            return
+        for column in columns:
+            constraints = self._find_foreign_constraints(table_name, column)
+            key_name = self.create_index_name(table_name, [column])
+            for _ in constraints:
+                self.execute(self.add_key_sql % {
+                    "table": self.quote_name(table_name),
+                    "key_name": self.quote_name(key_name),
+                    "column": self.quote_name(column)
+                })
